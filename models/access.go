@@ -1,4 +1,4 @@
-package auth
+package models
 
 import (
 	"time"
@@ -19,4 +19,17 @@ type TokenDetails struct {
 	RefreshUUID  string
 	AtExpires    int64
 	RtExpires    int64
+}
+
+//AccessDetails stored in jwt
+type AccessDetails struct {
+	AccessUUID string
+	UserID     uint
+	AtExpires  *time.Time
+}
+
+//RefreshDetails stored in jwt
+type RefreshDetails struct {
+	RefreshUUID string
+	UserID      uint
 }

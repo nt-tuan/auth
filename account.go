@@ -1,21 +1,32 @@
 package auth
 
 import (
-	"time"
-
 	"github.com/jinzhu/gorm"
+	"github.com/thanhtuan260593/auth/models"
 )
 
-//Account db model
-type Account struct {
-	*gorm.Model
-	Username          string `gorm:"type:varchar(100);unique_index"`
-	Email             string `gorm:"type:varchar(100);unique_index"`
-	EmailConfirmed    bool
-	PasswordHash      string `gorm:"type:varchar(max);index"`
-	SecurityStamp     string `gorm:"type:varchar(max)"`
-	AccessFailedCount uint
-	LockoutEnabled    bool
-	LockoutEnd        *time.Time
-	//Product changes approval
+//AccountRepository implement IAccountRepository, require dependancies: gorm.DB
+type AccountRepository struct {
+	IAccountRepository
+	db *gorm.DB
+}
+
+//Get new account implement based on non zero properties on account
+func (r *AccountRepository) Get(account *models.Account) error {
+	return nil
+}
+
+//Update an account implement
+func (r *AccountRepository) Update(account *models.Account) error {
+	return nil
+}
+
+//Add an account implement
+func (r *AccountRepository) Add(account *models.Account) error {
+	return nil
+}
+
+//Exist with condition
+func (r *AccountRepository) Exist(account *models.Account) (bool, error) {
+	return true, nil
 }

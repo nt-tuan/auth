@@ -1,97 +1,37 @@
 package auth
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-redis/redis"
 	"github.com/jinzhu/gorm"
+	"github.com/thanhtuan260593/auth/models"
 	"github.com/twinj/uuid"
-	"golang.org/x/crypto/bcrypt"
 )
 
-//IAuth interface
-type IAuth interface {
-	//Login user based on their usr and psw, return access token and refresh token
-	Login(usr string, psw string) (*string, *string, error)
-	//Logout user based on their token
-	Logout(token string) error
-	//VerifyToken access token. Return error if token is invalid or expired
-	VerifyToken(token string) (*AccessDetails, error)
-	//RefreshToken ask to refresh token. Reture access token and refresh token and error if token is expire or token is invalid
-	RefreshToken(token string) (string, string, error)
-	//Register account
-	Register(*Account, string) error
-}
-
-//AccessDetails stored in jwt
-type AccessDetails struct {
-	AccessUUID string
-	UserID     uint
-	AtExpires  *time.Time
-}
-
-//RefreshDetails stored in jwt
-type RefreshDetails struct {
-	RefreshUUID string
-	UserID      uint
-}
-
-var errEmailExist = errors.New("email existed")
-var errUsernameExist = errors.New("username existed")
-var errTokenExpire = errors.New("token expired")
-var errInvalidToken = errors.New("invalid token")
-
-//ErrPasswordInvalid error
-var ErrPasswordInvalid = errors.New("username and password mismatch")
-
-//Config data
-type Config struct {
-	Hash func(string) (string, error)
-	//Should define some policy
-	CompareHash   func(string, string) error
-	AccessSecret  string
-	RefreshSecret string
-}
-
-func hashPassword(pwd string) (string, error) {
-	bytePwd := []byte(pwd)
-	hash, err := bcrypt.GenerateFromPassword(bytePwd, bcrypt.MinCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hash), err
-}
-
-func compareHashPassword(pwd string, hash string) error {
-	byteHashPwd := []byte(hash)
-	return bcrypt.CompareHashAndPassword(byteHashPwd, []byte(pwd))
-}
-
-var defaultConfig = &Config{hashPassword, compareHashPassword, "hkhfkalknknvlzaoiis", "hqihoahfonogaosngoa"}
-
-//Auth di
+//Auth implement IAuth
 type Auth struct {
 	IAuth
-	db     *gorm.DB
-	claim  IClaimRepository
-	config *Config
+	account IAccountRepository
+	claim   IClaimRepository
+	config  *models.Config
 }
 
 //NewAuth from dependancies
-func NewAuth(db *gorm.DB, claim IClaimRepository) IAuth {
+func NewAuth(db *gorm.DB, client *redis.Client) IAuth {
 	return &Auth{
-		db:     db,
-		claim:  claim,
-		config: defaultConfig,
+		account: &AccountRepository{db: db},
+		claim:   NewRedisClaim(client),
+		config:  models.DefaultConfig,
 	}
 }
 
 //CreateToken create token
-func (auth *Auth) CreateToken(userid uint) (*TokenDetails, error) {
-	td := &TokenDetails{}
+func (auth *Auth) CreateToken(userid uint) (*models.TokenDetails, error) {
+	td := &models.TokenDetails{}
 	td.AtExpires = time.Now().Add(time.Minute * 15).Unix()
 	td.AccessUUID = uuid.NewV4().String()
 
@@ -124,15 +64,15 @@ func (auth *Auth) CreateToken(userid uint) (*TokenDetails, error) {
 }
 
 //CreateAuth func
-func (auth *Auth) CreateAuth(userid uint, td *TokenDetails) error {
+func (auth *Auth) CreateAuth(userid uint, td *models.TokenDetails) error {
 	at := time.Unix(td.AtExpires, 0) //converting Unix to UTC(to Time object)
 	rt := time.Unix(td.RtExpires, 0)
-	accessClaim := Claim{td.AccessUUID, userid, &at}
+	accessClaim := models.Claim{td.AccessUUID, userid, &at}
 	if err := auth.claim.AddClaim(&accessClaim); err != nil {
 		return err
 	}
 
-	refreshClaim := Claim{td.RefreshUUID, userid, &rt}
+	refreshClaim := models.Claim{td.RefreshUUID, userid, &rt}
 	if err := auth.claim.AddClaim(&refreshClaim); err != nil {
 		return err
 	}
@@ -142,8 +82,8 @@ func (auth *Auth) CreateAuth(userid uint, td *TokenDetails) error {
 
 //Login user based on their usr and psw, return access token and refresh token
 func (auth *Auth) Login(usr string, psw string) (*string, *string, error) {
-	account := &Account{Username: usr}
-	if err := auth.db.Where(Account{Username: usr}).First(account).Error; err != nil {
+	account := &models.Account{Username: usr}
+	if err := auth.account.Get(&models.Account{Username: usr}); err != nil {
 		return nil, nil, err
 	}
 	if err := auth.config.CompareHash(psw, account.PasswordHash); err != nil {
@@ -163,13 +103,13 @@ func (auth *Auth) Logout(token string) error {
 	if err != nil {
 		return err
 	}
-	err = auth.claim.RemoveClaim(&Claim{Key: au.AccessUUID})
+	err = auth.claim.RemoveClaim(&models.Claim{Key: au.AccessUUID})
 	return err
 	//deleted, err := client.Del(givenUuid).Result()
 }
 
 //ExtractTokenMetadata from jwt
-func (auth *Auth) ExtractTokenMetadata(tokenString string) (*AccessDetails, error) {
+func (auth *Auth) ExtractTokenMetadata(tokenString string) (*models.AccessDetails, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		//Make sure that the token method conform to "SigningMethodHMAC"
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -191,7 +131,7 @@ func (auth *Auth) ExtractTokenMetadata(tokenString string) (*AccessDetails, erro
 			return nil, err
 		}
 		at := time.Unix(claims["exp"].(int64), 0)
-		return &AccessDetails{
+		return &models.AccessDetails{
 			AccessUUID: accessUUID,
 			UserID:     uint(userID),
 			AtExpires:  &at,
@@ -201,10 +141,10 @@ func (auth *Auth) ExtractTokenMetadata(tokenString string) (*AccessDetails, erro
 }
 
 //VerifyToken access token. Return error if token is invalid or expired
-func (auth *Auth) VerifyToken(tokenString string) (*AccessDetails, error) {
+func (auth *Auth) VerifyToken(tokenString string) (*models.AccessDetails, error) {
 	accessDetail, err := auth.ExtractTokenMetadata(tokenString)
 	at := accessDetail.AtExpires
-	claim := Claim{accessDetail.AccessUUID, 0, nil}
+	claim := models.Claim{accessDetail.AccessUUID, 0, nil}
 	if err := auth.claim.GetClaim(&claim); err != nil {
 		return nil, err
 	}
@@ -212,7 +152,7 @@ func (auth *Auth) VerifyToken(tokenString string) (*AccessDetails, error) {
 	//if token is expired, remove it from db
 	if at.Before(time.Now()) {
 		auth.claim.RemoveClaim(&claim)
-		return nil, errTokenExpire
+		return nil, ErrTokenExpire
 	}
 	return accessDetail, err
 }
@@ -232,21 +172,21 @@ func (auth *Auth) RefreshToken(refreshToken string) (string, string, error) {
 	}
 	//is token valid?
 	if _, ok := token.Claims.(jwt.Claims); !ok && !token.Valid {
-		return "", "", errInvalidToken
+		return "", "", ErrInvalidToken
 	}
 	//Since token is valid, get the uuid:
 	claims, ok := token.Claims.(jwt.MapClaims) //the token claims should conform to MapClaims
 	if ok && token.Valid {
 		refreshUUID, ok := claims["refresh_uuid"].(string) //convert the interface to string
 		if !ok {
-			return "", "", errInvalidToken
+			return "", "", ErrInvalidToken
 		}
 		userID, err := strconv.ParseUint(fmt.Sprintf("%.f", claims["user_id"]), 10, 64)
 		if err != nil {
-			return "", "", errInvalidToken
+			return "", "", ErrInvalidToken
 		}
 		//Delete the previous Refresh Token
-		if err := auth.claim.RemoveClaim(&Claim{Key: refreshUUID}); err != nil {
+		if err := auth.claim.RemoveClaim(&models.Claim{Key: refreshUUID}); err != nil {
 			return "", "", err
 		}
 
@@ -261,26 +201,23 @@ func (auth *Auth) RefreshToken(refreshToken string) (string, string, error) {
 }
 
 //Register account
-func (auth *Auth) Register(account *Account, psw string) error {
-	var countUsername, countEmail = 0, 0
-	if err := auth.db.Where(&Account{Username: account.Username}).Count(&countUsername).Error; err != nil {
+func (auth *Auth) Register(account *models.Account, psw string) error {
+	if exist, err := auth.account.Exist(&models.Account{Username: account.Username}); err != nil {
 		return err
+	} else if exist {
+		return ErrUsernameExist
 	}
-	if countUsername == 0 {
-		return errUsernameExist
-	}
-	if err := auth.db.Where(&Account{Email: account.Email}).Count(&countEmail).Error; err != nil {
+	if exist, err := auth.account.Exist(&models.Account{Email: account.Email}); err != nil {
 		return err
-	}
-	if countEmail == 0 {
-		return errEmailExist
+	} else if exist {
+		return ErrEmailExist
 	}
 	if hash, err := auth.config.Hash(psw); err != nil {
 		return nil
 	} else {
 		account.PasswordHash = hash
 	}
-	if err := auth.db.Create(account).Error; err != nil {
+	if err := auth.account.Add(account); err != nil {
 		return err
 	}
 	return nil
